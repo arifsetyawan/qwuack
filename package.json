@@ -1,0 +1,40 @@
+{
+  "name": "qwuack",
+  "version": "0.1.0",
+  "description": "Redis-backed ledger with running totals optimization",
+  "type": "module",
+  "main": "./dist/ledger.js",
+  "types": "./dist/ledger.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/ledger.d.ts",
+      "import": "./dist/ledger.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "bun test",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "redis",
+    "ledger",
+    "accounting",
+    "financial",
+    "balance"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5",
+    "redis": "^5.0.0"
+  },
+  "dependencies": {
+    "bignumber.js": "^9.3.1"
+  }
+}
