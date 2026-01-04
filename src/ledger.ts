@@ -5,11 +5,12 @@
 // Types
 // ============================================================================
 
-export interface LedgerEntry {
+export interface LedgerEntry<TPayload = Record<string, unknown>> {
   id: string;
   context: string;
   currency: string;
   amount: string;
+  payload?: TPayload;
 }
 
 export interface BalanceResult {
@@ -18,8 +19,8 @@ export interface BalanceResult {
   entryCount: number;
 }
 
-export interface PaginatedResult {
-  entries: LedgerEntry[];
+export interface PaginatedResult<TPayload = Record<string, unknown>> {
+  entries: LedgerEntry<TPayload>[];
   nextCursor: string;
   hasMore: boolean;
 }
@@ -154,7 +155,7 @@ const DEFAULT_CONFIG: RequiredLedgerConfig = {
 // Ledger Class
 // ============================================================================
 
-export class Ledger {
+export class Ledger<TPayload = Record<string, unknown>> {
   private adapter: RedisAdapter;
   private config: RequiredLedgerConfig;
 
@@ -189,7 +190,7 @@ export class Ledger {
   async addEntry(
     accountId: string,
     currency: string,
-    entry: LedgerEntry
+    entry: LedgerEntry<TPayload>
   ): Promise<void> {
     const key = this.getLedgerKey(accountId, currency);
     const totalKey = this.getTotalKey(accountId, currency);
@@ -233,7 +234,7 @@ export class Ledger {
       return false;
     }
 
-    const entry: LedgerEntry = JSON.parse(raw);
+    const entry: LedgerEntry<TPayload> = JSON.parse(raw);
     const amount = parseFloat(entry.amount);
 
     // Atomic transaction: remove entry + update running totals
@@ -255,7 +256,7 @@ export class Ledger {
     accountId: string,
     currency: string,
     entryId: string
-  ): Promise<LedgerEntry | null> {
+  ): Promise<LedgerEntry<TPayload> | null> {
     const key = this.getLedgerKey(accountId, currency);
     const raw = await this.adapter.hGet(key, entryId);
     return raw ? JSON.parse(raw) : null;
@@ -295,11 +296,11 @@ export class Ledger {
     currency: string,
     cursor: string = "0",
     count: number = 100
-  ): Promise<PaginatedResult> {
+  ): Promise<PaginatedResult<TPayload>> {
     const key = this.getLedgerKey(accountId, currency);
     const result = await this.adapter.hScan(key, cursor, { COUNT: count });
 
-    const entries: LedgerEntry[] = [];
+    const entries: LedgerEntry<TPayload>[] = [];
     for (const item of result.entries) {
       entries.push(JSON.parse(item.value));
     }

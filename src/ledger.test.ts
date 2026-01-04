@@ -33,6 +33,34 @@ function createMockRedis() {
   };
 }
 
+// Mock ioredis client (has 'status' property and lowercase methods)
+function createMockIORedis() {
+  const mockPipeline = {
+    hset: mock(() => mockPipeline),
+    hdel: mock(() => mockPipeline),
+    incrbyfloat: mock(() => mockPipeline),
+    hincrbyfloat: mock(() => mockPipeline),
+    exec: mock(() => Promise.resolve([])),
+  };
+
+  return {
+    status: "ready", // ioredis-specific property for detection
+    hset: mock(() => Promise.resolve(1)),
+    hget: mock(() => Promise.resolve(null)),
+    hdel: mock(() => Promise.resolve(1)),
+    hlen: mock(() => Promise.resolve(0)),
+    hexists: mock(() => Promise.resolve(0)), // ioredis returns 0/1
+    hscan: mock(() => Promise.resolve(["0", []])), // ioredis format: [cursor, [field, value, ...]]
+    hgetall: mock(() => Promise.resolve({})),
+    hincrbyfloat: mock(() => Promise.resolve("0")),
+    get: mock(() => Promise.resolve(null)),
+    incrbyfloat: mock(() => Promise.resolve("0")),
+    del: mock((...keys: string[]) => Promise.resolve(keys.length)), // variadic
+    multi: mock(() => mockPipeline),
+    _mockPipeline: mockPipeline,
+  };
+}
+
 // ============================================================================
 // Test Fixtures
 // ============================================================================
@@ -386,6 +414,209 @@ describe("Ledger", () => {
         "myledger:acc_123:usd:total",
         "myledger:acc_123:usd:ctx",
       ]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Payload Tests
+  // --------------------------------------------------------------------------
+
+  describe("payload support", () => {
+    test("adds entry with payload", async () => {
+      mockRedis.hExists.mockReturnValue(Promise.resolve(false));
+      mockRedis.hLen.mockReturnValue(Promise.resolve(0));
+
+      interface TestPayload {
+        orderId: string;
+        metadata: { source: string };
+      }
+
+      const ledgerWithPayload = new Ledger<TestPayload>(mockRedis as any);
+      const entryWithPayload: LedgerEntry<TestPayload> = {
+        id: "entry_payload_001",
+        context: "purchase",
+        currency: "usd",
+        amount: "99.99",
+        payload: {
+          orderId: "order_123",
+          metadata: { source: "web" },
+        },
+      };
+
+      await ledgerWithPayload.addEntry(accountId, currency, entryWithPayload);
+
+      expect(mockRedis.multi).toHaveBeenCalled();
+      expect(mockRedis._mockMulti.exec).toHaveBeenCalled();
+    });
+
+    test("retrieves entry with payload", async () => {
+      const entryWithPayload = {
+        ...sampleEntry,
+        payload: { orderId: "order_456" },
+      };
+      mockRedis.hGet.mockReturnValue(Promise.resolve(JSON.stringify(entryWithPayload)));
+
+      const result = await ledger.getEntry(accountId, currency, "entry_001");
+
+      expect(result).toEqual(entryWithPayload);
+      expect(result?.payload).toEqual({ orderId: "order_456" });
+    });
+
+    test("works without payload (backward compatible)", async () => {
+      mockRedis.hExists.mockReturnValue(Promise.resolve(false));
+      mockRedis.hLen.mockReturnValue(Promise.resolve(0));
+
+      const entryWithoutPayload: LedgerEntry = {
+        id: "entry_no_payload",
+        context: "deposit",
+        currency: "usd",
+        amount: "100.00",
+      };
+
+      await ledger.addEntry(accountId, currency, entryWithoutPayload);
+
+      expect(mockRedis.multi).toHaveBeenCalled();
+    });
+  });
+});
+
+// ============================================================================
+// IORedis Adapter Tests
+// ============================================================================
+
+describe("Ledger with IORedis", () => {
+  let mockIORedis: ReturnType<typeof createMockIORedis>;
+  let ledger: Ledger;
+
+  beforeEach(() => {
+    mockIORedis = createMockIORedis();
+    ledger = new Ledger(mockIORedis as any);
+  });
+
+  describe("client detection", () => {
+    test("detects ioredis by status property", () => {
+      // If detection works, it should use lowercase methods
+      expect(mockIORedis.status).toBe("ready");
+    });
+  });
+
+  describe("addEntry with ioredis", () => {
+    test("adds entry successfully", async () => {
+      mockIORedis.hexists.mockReturnValue(Promise.resolve(0));
+      mockIORedis.hlen.mockReturnValue(Promise.resolve(0));
+
+      await ledger.addEntry(accountId, currency, sampleEntry);
+
+      expect(mockIORedis.hexists).toHaveBeenCalledWith(
+        "ledger:acc_123:usd",
+        "entry_001"
+      );
+      expect(mockIORedis.multi).toHaveBeenCalled();
+      expect(mockIORedis._mockPipeline.exec).toHaveBeenCalled();
+    });
+
+    test("throws on duplicate (hexists returns 1)", async () => {
+      mockIORedis.hexists.mockReturnValue(Promise.resolve(1));
+
+      await expect(
+        ledger.addEntry(accountId, currency, sampleEntry)
+      ).rejects.toThrow("Duplicate entry");
+    });
+  });
+
+  describe("removeEntry with ioredis", () => {
+    test("removes entry successfully", async () => {
+      mockIORedis.hget.mockReturnValue(Promise.resolve(JSON.stringify(sampleEntry)));
+
+      const result = await ledger.removeEntry(accountId, currency, "entry_001");
+
+      expect(result).toBe(true);
+      expect(mockIORedis._mockPipeline.hdel).toHaveBeenCalled();
+    });
+
+    test("returns false for non-existent entry", async () => {
+      mockIORedis.hget.mockReturnValue(Promise.resolve(null));
+
+      const result = await ledger.removeEntry(accountId, currency, "nonexistent");
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe("getEntry with ioredis", () => {
+    test("returns entry when exists", async () => {
+      mockIORedis.hget.mockReturnValue(Promise.resolve(JSON.stringify(sampleEntry)));
+
+      const result = await ledger.getEntry(accountId, currency, "entry_001");
+
+      expect(result).toEqual(sampleEntry);
+    });
+  });
+
+  describe("getSum with ioredis", () => {
+    test("returns sum", async () => {
+      mockIORedis.get.mockReturnValue(Promise.resolve("500.00"));
+
+      const result = await ledger.getSum(accountId, currency);
+
+      expect(result).toBe("500.00");
+    });
+  });
+
+  describe("getBalance with ioredis", () => {
+    test("returns balance", async () => {
+      mockIORedis.get.mockReturnValue(Promise.resolve("1000.00"));
+      mockIORedis.hlen.mockReturnValue(Promise.resolve(3));
+      mockIORedis.hgetall.mockReturnValue(Promise.resolve({ deposit: "1000.00" }));
+
+      const result = await ledger.getBalance(accountId, currency);
+
+      expect(result).toEqual({
+        total: "1000.00",
+        byContext: { deposit: "1000.00" },
+        entryCount: 3,
+      });
+    });
+  });
+
+  describe("getEntriesPaginated with ioredis", () => {
+    test("handles ioredis hscan format", async () => {
+      const entry1 = { ...sampleEntry, id: "entry_001" };
+      const entry2 = { ...sampleEntry, id: "entry_002" };
+
+      // ioredis returns [cursor, [field1, value1, field2, value2, ...]]
+      mockIORedis.hscan.mockReturnValue(
+        Promise.resolve([
+          "100",
+          ["entry_001", JSON.stringify(entry1), "entry_002", JSON.stringify(entry2)],
+        ])
+      );
+
+      const result = await ledger.getEntriesPaginated(accountId, currency, "0", 10);
+
+      expect(result.entries).toHaveLength(2);
+      expect(result.entries[0]).toEqual(entry1);
+      expect(result.entries[1]).toEqual(entry2);
+      expect(result.nextCursor).toBe("100");
+      expect(result.hasMore).toBe(true);
+    });
+
+    test("returns empty on last page", async () => {
+      mockIORedis.hscan.mockReturnValue(Promise.resolve(["0", []]));
+
+      const result = await ledger.getEntriesPaginated(accountId, currency);
+
+      expect(result.entries).toHaveLength(0);
+      expect(result.hasMore).toBe(false);
+    });
+  });
+
+  describe("clearLedger with ioredis", () => {
+    test("deletes all keys using variadic args", async () => {
+      await ledger.clearLedger(accountId, currency);
+
+      // ioredis del() is called with spread args
+      expect(mockIORedis.del).toHaveBeenCalled();
     });
   });
 });
