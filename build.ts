@@ -18,7 +18,7 @@ const result = await Bun.build({
   format: "esm",
   sourcemap: "external",
   minify: false,
-  external: ["redis"],
+  external: ["redis", "ioredis"],
 });
 
 if (!result.success) {

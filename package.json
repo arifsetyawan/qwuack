@@ -17,6 +17,7 @@
   "scripts": {
     "build": "bun run build.ts",
     "test": "bun test",
+    "test:coverage": "bun test --coverage",
     "prepublishOnly": "bun run build"
   },
   "keywords": [
@@ -27,12 +28,29 @@
     "balance"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arifsetyawan/qwuack.git"
+  },
+  "bugs": {
+    "url": "https://github.com/arifsetyawan/qwuack/issues"
+  },
+  "homepage": "https://github.com/arifsetyawan/qwuack#readme",
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5",
-    "redis": "^5.0.0"
+    "redis": "^5.0.0",
+    "ioredis": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "redis": {
+      "optional": true
+    },
+    "ioredis": {
+      "optional": true
+    }
   },
   "dependencies": {
     "bignumber.js": "^9.3.1"

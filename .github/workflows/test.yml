@@ -1,0 +1,57 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests with coverage
+        id: coverage
+        run: |
+          # Run tests and capture output
+          OUTPUT=$(bun test --coverage 2>&1)
+          echo "$OUTPUT"
+
+          # Extract line coverage percentage
+          COVERAGE=$(echo "$OUTPUT" | grep -E "^\s*All files" | awk '{print $4}' | tr -d '%')
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+
+          # Determine badge color based on coverage
+          if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
+            echo "color=brightgreen" >> $GITHUB_OUTPUT
+          elif (( $(echo "$COVERAGE >= 60" | bc -l) )); then
+            echo "color=yellow" >> $GITHUB_OUTPUT
+          else
+            echo "color=red" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build
+        run: bun run build
+
+      - name: Create coverage badge
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ secrets.GIST_ID }}
+          filename: qwuack-coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.coverage }}%
+          color: ${{ steps.coverage.outputs.color }}
