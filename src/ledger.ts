@@ -333,3 +333,5 @@ export class Ledger<TPayload = Record<string, unknown>> {
     return { ...this.config };
   }
 }
+
+export default Ledger;

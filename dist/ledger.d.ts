@@ -39,4 +39,4 @@ export declare class Ledger<TPayload = Record<string, unknown>> {
     clearLedger(accountId: string, currency: string): Promise<void>;
     getConfig(): RequiredLedgerConfig;
 }
-export {};
+export default Ledger;

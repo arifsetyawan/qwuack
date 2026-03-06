@@ -1,4 +1,38 @@
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __moduleCache = /* @__PURE__ */ new WeakMap;
+var __toCommonJS = (from) => {
+  var entry = __moduleCache.get(from), desc;
+  if (entry)
+    return entry;
+  entry = __defProp({}, "__esModule", { value: true });
+  if (from && typeof from === "object" || typeof from === "function")
+    __getOwnPropNames(from).map((key) => !__hasOwnProp.call(entry, key) && __defProp(entry, key, {
+      get: () => from[key],
+      enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+    }));
+  __moduleCache.set(from, entry);
+  return entry;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: (newValue) => all[name] = () => newValue
+    });
+};
+
 // src/ledger.ts
+var exports_ledger = {};
+__export(exports_ledger, {
+  default: () => ledger_default,
+  Ledger: () => Ledger
+});
+module.exports = __toCommonJS(exports_ledger);
 function createNodeRedisAdapter(client) {
   return {
     hSet: (key, field, value) => client.hSet(key, field, value),
@@ -189,9 +223,5 @@ class Ledger {
   }
 }
 var ledger_default = Ledger;
-export {
-  ledger_default as default,
-  Ledger
-};
 
-//# debugId=B9B1C7914D90CE4064756E2164756E21
+//# debugId=8D1B1A0FFC04C51D64756E2164756E21

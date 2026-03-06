@@ -29,6 +29,27 @@ if (!result.success) {
   process.exit(1);
 }
 
+// Build CJS bundle
+console.log("Compiling TypeScript to CommonJS...");
+const cjsResult = await Bun.build({
+  entrypoints: ["./src/ledger.ts"],
+  outdir: "./dist",
+  target: "node",
+  format: "cjs",
+  naming: "[dir]/ledger.cjs",
+  sourcemap: "external",
+  minify: false,
+  external: ["redis", "ioredis"],
+});
+
+if (!cjsResult.success) {
+  console.error("CJS build failed:");
+  for (const log of cjsResult.logs) {
+    console.error(log);
+  }
+  process.exit(1);
+}
+
 // Generate type declarations with tsc
 console.log("Generating type declarations...");
 await $`bun run tsc -p tsconfig.build.json`;
@@ -39,4 +60,6 @@ console.log(`\nBuild complete in ${duration}s`);
 console.log("Output:");
 console.log("  dist/ledger.js      - ESM bundle");
 console.log("  dist/ledger.js.map  - Source map");
+console.log("  dist/ledger.cjs     - CJS bundle");
+console.log("  dist/ledger.cjs.map - CJS source map");
 console.log("  dist/ledger.d.ts    - Type declarations");
