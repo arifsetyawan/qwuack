@@ -7,8 +7,12 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # NPM_TOKEN lives in the production environment's secrets
     environment: production
+    # Trusted publishing (OIDC): npm mints a short-lived credential from the
+    # workflow identity; no NPM_TOKEN secret is involved.
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -22,8 +26,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing requires npm >= 11.5.1
+      - name: Update npm
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: bun install
@@ -36,8 +44,6 @@ jobs:
 
       - name: Publish to NPM
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create version badge
         uses: schneegans/dynamic-badges-action@v1.7.0
