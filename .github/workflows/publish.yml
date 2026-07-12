@@ -7,6 +7,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # NPM_TOKEN lives in the production environment's secrets
+    environment: production
 
     steps:
       - name: Checkout
