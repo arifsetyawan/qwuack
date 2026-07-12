@@ -39,7 +39,8 @@
   "homepage": "https://github.com/arifsetyawan/qwuack#readme",
   "devDependencies": {
     "@types/bun": "latest",
-    "ioredis": "5.4.1"
+    "ioredis": "5.4.1",
+    "redis": "5.10.0"
   },
   "peerDependencies": {
     "typescript": "^5"
