@@ -91,3 +91,33 @@ describe("core operations", () => {
     }
   });
 });
+
+describe("atomicity under concurrency", () => {
+  test("same-id storm: exactly one add wins", async () => {
+    const results = await Promise.allSettled(
+      Array.from({ length: 50 }, () => addEntry(ACC, CUR, entry("same", "10")))
+    );
+    const wins = results.filter((r) => r.status === "fulfilled").length;
+    const dups = results.filter(
+      (r) => r.status === "rejected" && String(r.reason).includes("Duplicate entry")
+    ).length;
+    expect(wins).toBe(1);
+    expect(dups).toBe(49);
+    expect(await getSum(ACC, CUR)).toBe("10");
+    expect((await getBalance(ACC, CUR)).entryCount).toBe(1);
+  });
+
+  test("equal add/remove storm nets to exactly zero", async () => {
+    await Promise.all(
+      Array.from({ length: 200 }, async (_, i) => {
+        const id = `storm-${i}`;
+        await addEntry(ACC, CUR, entry(id, "7"));
+        await removeEntry(ACC, CUR, id);
+      })
+    );
+    expect(await getSum(ACC, CUR)).toBe("0");
+    const bal = await getBalance(ACC, CUR);
+    expect(bal.entryCount).toBe(0);
+    expect(bal.byContext.test ?? "0").toBe("0");
+  }, 20000);
+});
