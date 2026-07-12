@@ -32,6 +32,7 @@ const COLD_ACCOUNTS = Number(process.env.COLD_ACCOUNTS ?? 500);
 const HOT_TRAFFIC_SHARE = Number(process.env.HOT_TRAFFIC_SHARE ?? 0.5);
 const READ_RATIO = Number(process.env.READ_RATIO ?? 0.05);
 const TICK_MS = 10;
+const DRAIN_TIMEOUT_MS = 30000;
 const CURRENCY = "vnd";
 
 // ============================================================================
@@ -167,9 +168,18 @@ async function runLevel(targetRps: number, durationSeconds: number): Promise<Lev
     await Bun.sleep(TICK_MS);
   }
 
-  // Drain in-flight ops (open loop: these were fired inside the window).
-  while (inFlight > 0) {
+  // Drain in-flight ops (open loop: fired inside the window). Cap the wait so
+  // a hung connection cannot stall the run; undrained ops already count
+  // against the success rate (attempted but never completed).
+  const drainStart = performance.now();
+  while (inFlight > 0 && performance.now() - drainStart < DRAIN_TIMEOUT_MS) {
     await Bun.sleep(20);
+  }
+  if (inFlight > 0) {
+    errorCounts.set(
+      `drain timeout: ${inFlight} pairs still in-flight after ${DRAIN_TIMEOUT_MS / 1000}s`,
+      inFlight
+    );
   }
 
   const duration = (performance.now() - start) / 1000;
