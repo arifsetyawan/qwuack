@@ -26,6 +26,7 @@
 - **Entry Limits** - Configurable maximum entries per account/currency
 - **Pagination** - Efficient cursor-based pagination for large datasets
 - **Context Breakdown** - Track balances by context (deposit, withdrawal, etc.)
+- **Typed Payloads** - Attach custom metadata to entries with full generic type safety
 
 ## Installation
 
@@ -112,6 +113,7 @@ await ledger.addEntry("user_123", "usd", {
   context: "deposit",   // Category for breakdown
   currency: "usd",      // Currency code
   amount: "100.00",     // Amount as string
+  payload: { note: "…" }, // Optional custom metadata (see Typed Payloads)
 });
 ```
 
@@ -253,7 +255,9 @@ entry. Override per call via the `pendingTtlMs` option.
 Adds a `pending` entry (stamped with `state: "pending"` and `pendingExpiresAt`). It updates
 the per-context breakdown but does **not** reserve against the running total — use
 `addPendingEntryIfSufficient` when you need a balance-guarded reservation. Returns
-`{ duplicate: true }` if the entry id already exists.
+`{ duplicate: true }` if the entry id already exists. Like `addEntry`, it enforces
+`maxEntriesPerKey` — the call rejects with a `LEDGER_LIMIT_REACHED` error once the
+limit is reached (the same applies to `addPendingEntryIfSufficient`).
 
 ```typescript
 const { duplicate } = await ledger.addPendingEntry("user_123", "usd", {
@@ -302,6 +306,31 @@ context breakdown, and deletes the entry.
 ```typescript
 const { status } = await ledger.cancelEntry("user_123", "usd", "txn_003");
 // status: "cancelled" | "not_pending" | "not_found"
+```
+
+## Typed Payloads
+
+Every entry accepts an optional `payload` field for custom metadata. `Ledger` is generic
+over the payload type — pass a type parameter for full type safety on reads and writes:
+
+```typescript
+interface TxnMeta {
+  orderId: string;
+  source: "api" | "batch";
+}
+
+const ledger = new Ledger<TxnMeta>(redis);
+
+await ledger.addEntry("user_123", "usd", {
+  id: "txn_001",
+  context: "deposit",
+  currency: "usd",
+  amount: "100.00",
+  payload: { orderId: "order_42", source: "api" },
+});
+
+const entry = await ledger.getEntry("user_123", "usd", "txn_001");
+// entry?.payload is typed as TxnMeta | undefined
 ```
 
 ## Configuration
