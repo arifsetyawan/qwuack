@@ -16,6 +16,7 @@ export interface LedgerEntry<TPayload = Record<string, unknown>> {
   state?: EntryState;
   pendingExpiresAt?: number;
   confirmedAt?: number;
+  held?: boolean;
 }
 
 export interface BalanceResult {
@@ -212,13 +213,14 @@ if entry.state ~= 'pending' then
   return cjson.encode({ status = 'already_confirmed' })
 end
 local amount = tonumber(entry.amount)
-if amount < 0 then
+if entry.held then
   redis.call('INCRBYFLOAT', KEYS[3], -amount)
 end
 redis.call('INCRBYFLOAT', KEYS[2], entry.amount)
 entry.state = 'confirmed'
 entry.confirmedAt = tonumber(ARGV[2])
 entry.pendingExpiresAt = nil
+entry.held = nil
 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(entry))
 return cjson.encode({ status = 'confirmed' })
 `;
@@ -327,6 +329,7 @@ export class Ledger<TPayload = Record<string, unknown>> {
       ...entry,
       state: "pending",
       pendingExpiresAt: Date.now() + ttl,
+      held: true,
     };
     const raw = await this.adapter.eval(
       ADD_PENDING_IF_SUFFICIENT_LUA,

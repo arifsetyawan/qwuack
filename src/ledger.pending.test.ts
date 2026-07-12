@@ -60,6 +60,7 @@ describe("addPendingEntryIfSufficient", () => {
     expect(client.eval.mock.calls[0][6]).toBe("d1");
     const storedJson = JSON.parse(client.eval.mock.calls[0][7]);
     expect(storedJson.state).toBe("pending");
+    expect(storedJson.held).toBe(true);
     expect(client.eval.mock.calls[0][8]).toBe("-40");   // amount
     expect(client.eval.mock.calls[0][9]).toBe("transaction/conversion");
     expect(client.eval.mock.calls[0][10]).toBe("-100"); // floor
