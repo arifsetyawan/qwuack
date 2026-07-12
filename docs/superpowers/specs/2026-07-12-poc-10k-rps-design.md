@@ -50,6 +50,7 @@ Loaded once at startup via `SCRIPT LOAD`, invoked per call with `EVALSHA`, falli
 
 **ADD** — KEYS: hash, total, ctx; ARGV: entryId, entryJson, amount, context, maxEntries
 
+0. validate the amount is a strict decimal number → else return `"BADAMT"` (mapped to `Error("Invalid amount: ...")`)
 1. `HEXISTS hash entryId` → if 1, return `"DUP"`
 2. `HLEN hash` → if ≥ maxEntries, return `"LIMIT"`
 3. `HSET hash entryId entryJson`
@@ -62,7 +63,7 @@ Loaded once at startup via `SCRIPT LOAD`, invoked per call with `EVALSHA`, falli
 1. `HGET hash entryId` → if nil, return `0`
 2. `cjson.decode` the stored JSON to read `amount` and `context`
 3. `HDEL hash entryId`
-4. `INCRBYFLOAT total -amount`
+4. `INCRBYFLOAT total` with the string-negated amount (sign-prefix flip, no float round-trip)
 5. `HINCRBYFLOAT ctx context -amount`
 6. return `1`
 
@@ -96,7 +97,7 @@ Open-loop, self-correcting scheduler:
 - `HOT_ACCOUNTS=5` hot accounts receive `HOT_TRAFFIC_SHARE=50%` of operations
 - `COLD_ACCOUNTS=500` cold accounts share the remainder uniformly
 - Each pair adds then removes the same entry (keeps hash sizes bounded across a 60s run)
-- `READ_RATIO=5%` of operations additionally issue a `getBalance` on the chosen account
+- `READ_RATIO=5%` of pairs additionally issue a `getBalance` on the chosen account
 - RPS levels ramp `1000 → 5000 → 10000` (`RPS_LEVELS` env), 60s each (`DURATION_S`), 5s cooldown between levels
 
 ### Metrics

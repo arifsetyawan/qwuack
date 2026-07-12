@@ -77,6 +77,9 @@ function ledgerKeys(accountId: string, currency: string): string[] {
 // ============================================================================
 
 const ADD_SCRIPT = `
+if not (string.match(ARGV[3], '^%-?%d+%.?%d*$') or string.match(ARGV[3], '^%-?%.%d+$')) then
+  return 'BADAMT'
+end
 if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
   return 'DUP'
 end
@@ -95,7 +98,13 @@ if not raw then
   return 0
 end
 local entry = cjson.decode(raw)
-local neg = tostring(0 - tonumber(entry.amount))
+local a = entry.amount
+local neg
+if string.sub(a, 1, 1) == '-' then
+  neg = string.sub(a, 2)
+else
+  neg = '-' .. a
+end
 redis.call('HDEL', KEYS[1], ARGV[1])
 redis.call('INCRBYFLOAT', KEYS[2], neg)
 redis.call('HINCRBYFLOAT', KEYS[3], entry.context, neg)
@@ -142,6 +151,9 @@ async function addEntry(
     entry.context,
     String(maxEntries),
   ]);
+  if (result === "BADAMT") {
+    throw new Error(`Invalid amount: '${entry.amount}' is not a valid decimal number`);
+  }
   if (result === "DUP") {
     throw new Error(`Duplicate entry: entry with id '${entry.id}' already exists`);
   }

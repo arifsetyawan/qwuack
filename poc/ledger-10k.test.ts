@@ -121,3 +121,19 @@ describe("atomicity under concurrency", () => {
     expect(bal.byContext.test ?? "0").toBe("0");
   }, 20000);
 });
+
+describe("amount validation and precision", () => {
+  test("non-numeric amount is rejected atomically (nothing applied)", async () => {
+    await expect(addEntry(ACC, CUR, entry("bad", "abc"))).rejects.toThrow("Invalid amount");
+    await expect(addEntry(ACC, CUR, entry("bad2", "nan"))).rejects.toThrow("Invalid amount");
+    expect(await getEntry(ACC, CUR, "bad")).toBeNull();
+    expect(await getSum(ACC, CUR)).toBe("0");
+    expect((await getBalance(ACC, CUR)).entryCount).toBe(0);
+  });
+
+  test("high-precision amount adds and removes to exact zero", async () => {
+    await addEntry(ACC, CUR, entry("hp", "1234567890.12345"));
+    expect(await removeEntry(ACC, CUR, "hp")).toBe(true);
+    expect(await getSum(ACC, CUR)).toBe("0");
+  });
+});
