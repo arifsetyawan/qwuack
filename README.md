@@ -20,11 +20,13 @@
 
 - **O(1) Balance Queries** - Uses running totals instead of scanning all entries
 - **Atomic Transactions** - All write operations use Redis MULTI/EXEC
+- **Two-Phase Entries** - Reserve funds with pending entries, then confirm or cancel
 - **Dual Client Support** - Works with both `redis` (node-redis) and `ioredis`
 - **Deduplication** - Prevents duplicate entries by ID
 - **Entry Limits** - Configurable maximum entries per account/currency
 - **Pagination** - Efficient cursor-based pagination for large datasets
 - **Context Breakdown** - Track balances by context (deposit, withdrawal, etc.)
+- **Typed Payloads** - Attach custom metadata to entries with full generic type safety
 
 ## Installation
 
@@ -111,12 +113,16 @@ await ledger.addEntry("user_123", "usd", {
   context: "deposit",   // Category for breakdown
   currency: "usd",      // Currency code
   amount: "100.00",     // Amount as string
+  payload: { note: "…" }, // Optional custom metadata (see Typed Payloads)
 });
 ```
 
 ### `removeEntry(accountId, currency, entryId)`
 
-Removes an entry and updates running totals. Returns `true` if removed, `false` if not found.
+Removes a **confirmed** (or legacy stateless) entry and updates running totals. Returns
+`true` if removed, `false` if not found **or if the entry is still `pending`** — pending
+entries must be resolved with `confirmEntry` or `cancelEntry` first (see
+[Two-Phase Entries](#two-phase-entries)).
 
 ```typescript
 const removed = await ledger.removeEntry("user_123", "usd", "txn_001");
@@ -132,10 +138,16 @@ const entry = await ledger.getEntry("user_123", "usd", "txn_001");
 
 ### `getSum(accountId, currency)`
 
-Returns the total sum for an account/currency pair. O(1) operation.
+Returns the **available** sum for an account/currency pair — the confirmed running total
+**plus** any outstanding reservations from `held` pending entries (`:total + :hold`). O(1)
+operation.
+
+> **Semantic change in 0.2.0:** `getSum` previously returned only the confirmed total.
+> It now returns `total + hold` so that funds reserved by `addPendingEntryIfSufficient`
+> are already reflected in the available balance. See [Two-Phase Entries](#two-phase-entries).
 
 ```typescript
-const total = await ledger.getSum("user_123", "usd");
+const available = await ledger.getSum("user_123", "usd");
 // "100.00"
 ```
 
@@ -167,10 +179,158 @@ do {
 
 ### `clearLedger(accountId, currency)`
 
-Removes all entries and totals for an account/currency pair.
+Removes all entries and totals for an account/currency pair, including the running total,
+the per-context breakdown, and the `:hold` reservation total.
 
 ```typescript
 await ledger.clearLedger("user_123", "usd");
+```
+
+## Two-Phase Entries
+
+In addition to the single-shot `addEntry`, qwuack supports a **two-phase lifecycle** for
+entries whose outcome is not yet final (e.g. an in-flight authorization or transfer). An
+entry is first added as **`pending`**, then later **confirmed** (it becomes permanent) or
+**cancelled** (it is rolled back).
+
+### Entry lifecycle
+
+```
+addPendingEntry / addPendingEntryIfSufficient
+                    │
+              state: "pending"
+                    │
+        ┌───────────┴───────────┐
+   confirmEntry              cancelEntry
+        │                        │
+  state: "confirmed"        entry removed
+  (permanent, counted       (reservation released)
+   in the running total)
+```
+
+Every `LedgerEntry` carries optional lifecycle fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `state` | `"pending" \| "confirmed"` | Current lifecycle state. Absent on legacy entries. |
+| `pendingExpiresAt` | `number` (epoch ms) | When the pending reservation expires. Set on add, cleared on confirm. |
+| `confirmedAt` | `number` (epoch ms) | When the entry was confirmed. |
+| `held` | `boolean` | `true` when the entry reserved funds in the `:hold` total (see below). |
+
+### The `held` reservation marker
+
+`addPendingEntryIfSufficient` stamps the entry with `held: true` and moves its amount into
+a dedicated `:hold` running total. This is what makes reserved funds visible in the
+**available balance** returned by `getSum` (`:total + :hold`) *before* the entry is
+confirmed. When the entry is later confirmed the amount is moved from `:hold` into `:total`;
+when cancelled it is simply released from `:hold`.
+
+The `held` flag — **not** the sign of the amount — is what decides whether `confirmEntry`
+and `cancelEntry` release the hold. Plain `addPendingEntry` does **not** set `held` and does
+**not** reserve funds, so its confirm/cancel leave `:hold` untouched.
+
+### Legacy stateless entries are treated as confirmed
+
+Entries written by earlier versions (or by `addEntry`) have no `state` field. They are
+treated as **confirmed** everywhere:
+
+- `removeEntry` will remove them (only `state === "pending"` is refused).
+- `confirmEntry` on such an entry returns `{ status: "already_confirmed" }`.
+- `cancelEntry` on such an entry returns `{ status: "not_pending" }`.
+
+This makes the two-phase feature fully backward compatible — no migration is required.
+
+### `DEFAULT_PENDING_TTL_MS`
+
+```typescript
+import { DEFAULT_PENDING_TTL_MS } from "qwuack";
+// 600_000  (10 minutes)
+```
+
+Exported constant used as the default TTL when stamping `pendingExpiresAt` on a pending
+entry. Override per call via the `pendingTtlMs` option.
+
+### `addPendingEntry(accountId, currency, entry, options?)`
+
+Adds a `pending` entry (stamped with `state: "pending"` and `pendingExpiresAt`). It updates
+the per-context breakdown but does **not** reserve against the running total — use
+`addPendingEntryIfSufficient` when you need a balance-guarded reservation. Returns
+`{ duplicate: true }` if the entry id already exists. Like `addEntry`, it enforces
+`maxEntriesPerKey` — the call rejects with a `LEDGER_LIMIT_REACHED` error once the
+limit is reached (the same applies to `addPendingEntryIfSufficient`).
+
+```typescript
+const { duplicate } = await ledger.addPendingEntry("user_123", "usd", {
+  id: "txn_002",
+  context: "transfer",
+  currency: "usd",
+  amount: "-25.00",
+}, { pendingTtlMs: 300_000 }); // optional, defaults to DEFAULT_PENDING_TTL_MS
+```
+
+### `addPendingEntryIfSufficient(accountId, currency, entry, floor, options?)`
+
+Atomically checks the available sum (`:total + :hold`) and, if `available + amount >= floor`,
+adds the entry as `pending`, stamps it `held: true`, and reserves the amount in `:hold`.
+Otherwise nothing is written. The whole check-and-reserve runs in a single Redis script, so
+concurrent callers cannot both reserve past the floor.
+
+```typescript
+const result = await ledger.addPendingEntryIfSufficient(
+  "user_123",
+  "usd",
+  { id: "txn_003", context: "withdrawal", currency: "usd", amount: "-40.00" },
+  "0" // floor: available balance may not drop below 0
+);
+// success:  { success: true,  currentSum: "60.00" }
+// rejected: { success: false, reason: "INSUFFICIENT_BALANCE", currentSum: "20.00" }
+// duplicate:{ success: true,  duplicate: true, currentSum: "60.00" }
+```
+
+### `confirmEntry(accountId, currency, entryId)`
+
+Confirms a `pending` entry: moves its amount from `:hold` into the running `:total` (only
+releasing `:hold` when the entry was `held`), sets `confirmedAt`, and clears
+`pendingExpiresAt`/`held`.
+
+```typescript
+const { status } = await ledger.confirmEntry("user_123", "usd", "txn_003");
+// status: "confirmed" | "already_confirmed" | "not_found"
+```
+
+### `cancelEntry(accountId, currency, entryId)`
+
+Rolls back a `pending` entry: releases its `:hold` reservation (when `held`), reverses its
+context breakdown, and deletes the entry.
+
+```typescript
+const { status } = await ledger.cancelEntry("user_123", "usd", "txn_003");
+// status: "cancelled" | "not_pending" | "not_found"
+```
+
+## Typed Payloads
+
+Every entry accepts an optional `payload` field for custom metadata. `Ledger` is generic
+over the payload type — pass a type parameter for full type safety on reads and writes:
+
+```typescript
+interface TxnMeta {
+  orderId: string;
+  source: "api" | "batch";
+}
+
+const ledger = new Ledger<TxnMeta>(redis);
+
+await ledger.addEntry("user_123", "usd", {
+  id: "txn_001",
+  context: "deposit",
+  currency: "usd",
+  amount: "100.00",
+  payload: { orderId: "order_42", source: "api" },
+});
+
+const entry = await ledger.getEntry("user_123", "usd", "txn_001");
+// entry?.payload is typed as TxnMeta | undefined
 ```
 
 ## Configuration
@@ -189,14 +349,19 @@ For an account `user_123` with currency `usd` and default prefix:
 | Key | Type | Purpose |
 |-----|------|---------|
 | `ledger:user_123:usd` | Hash | Stores all entries |
-| `ledger:user_123:usd:total` | String | Running total sum |
+| `ledger:user_123:usd:total` | String | Running total sum (confirmed entries) |
 | `ledger:user_123:usd:ctx` | Hash | Running totals by context |
+| `ledger:user_123:usd:hold` | String | Reserved total from `held` pending entries |
 
 ## Performance
 
 | Operation | Time Complexity |
 |-----------|-----------------|
 | `addEntry` | O(1) |
+| `addPendingEntry` | O(1) |
+| `addPendingEntryIfSufficient` | O(1) |
+| `confirmEntry` | O(1) |
+| `cancelEntry` | O(1) |
 | `removeEntry` | O(1) |
 | `getEntry` | O(1) |
 | `getSum` | O(1) |

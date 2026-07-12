@@ -2,27 +2,37 @@ var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __moduleCache = /* @__PURE__ */ new WeakMap;
+function __accessProp(key) {
+  return this[key];
+}
 var __toCommonJS = (from) => {
-  var entry = __moduleCache.get(from), desc;
+  var entry = (__moduleCache ??= new WeakMap).get(from), desc;
   if (entry)
     return entry;
   entry = __defProp({}, "__esModule", { value: true });
-  if (from && typeof from === "object" || typeof from === "function")
-    __getOwnPropNames(from).map((key) => !__hasOwnProp.call(entry, key) && __defProp(entry, key, {
-      get: () => from[key],
-      enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
-    }));
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (var key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(entry, key))
+        __defProp(entry, key, {
+          get: __accessProp.bind(from, key),
+          enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+        });
+  }
   __moduleCache.set(from, entry);
   return entry;
 };
+var __moduleCache;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: (newValue) => all[name] = () => newValue
+      set: __exportSetter.bind(all, name)
     });
 };
 
@@ -30,7 +40,8 @@ var __export = (target, all) => {
 var exports_ledger = {};
 __export(exports_ledger, {
   default: () => ledger_default,
-  Ledger: () => Ledger
+  Ledger: () => Ledger,
+  DEFAULT_PENDING_TTL_MS: () => DEFAULT_PENDING_TTL_MS
 });
 module.exports = __toCommonJS(exports_ledger);
 function createNodeRedisAdapter(client) {
@@ -44,8 +55,10 @@ function createNodeRedisAdapter(client) {
     hIncrByFloat: (key, field, increment) => client.hIncrByFloat(key, field, increment),
     hScan: (key, cursor, options) => client.hScan(key, cursor, options),
     get: (key) => client.get(key),
+    mGet: (keys) => client.mGet(keys),
     incrByFloat: (key, increment) => client.incrByFloat(key, increment),
     del: (keys) => client.del(keys),
+    eval: (script, keys, args) => client.eval(script, { keys, arguments: args }),
     multi: () => {
       const m = client.multi();
       const adapter = {
@@ -89,8 +102,10 @@ function createIORedisAdapter(client) {
       return { cursor: nextCursor, entries };
     },
     get: (key) => client.get(key),
+    mGet: (keys) => client.mget(...keys),
     incrByFloat: (key, increment) => client.incrbyfloat(key, increment),
     del: (keys) => client.del(...keys),
+    eval: (script, keys, args) => client.eval(script, keys.length, ...keys, ...args),
     multi: () => {
       const pipeline = client.multi();
       const adapter = {
@@ -127,6 +142,93 @@ var DEFAULT_CONFIG = {
   maxEntriesPerKey: 1e6,
   keyPrefix: "ledger"
 };
+var DEFAULT_PENDING_TTL_MS = 600000;
+var ADD_PENDING_ENTRY_LUA = `
+local maxEntries = tonumber(ARGV[5])
+if maxEntries and maxEntries > 0 and redis.call('HLEN', KEYS[1]) >= maxEntries then
+  return redis.error_reply('LEDGER_LIMIT_REACHED')
+end
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+  return cjson.encode({ duplicate = true })
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('HINCRBYFLOAT', KEYS[2], ARGV[4], ARGV[3])
+return cjson.encode({ duplicate = false })
+`;
+var ADD_PENDING_IF_SUFFICIENT_LUA = `
+local maxEntries = tonumber(ARGV[6])
+if maxEntries and maxEntries > 0 and redis.call('HLEN', KEYS[1]) >= maxEntries then
+  return redis.error_reply('LEDGER_LIMIT_REACHED')
+end
+local total = tonumber(redis.call('GET', KEYS[2]) or '0')
+local hold = tonumber(redis.call('GET', KEYS[4]) or '0')
+local avail = total + hold
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+  return cjson.encode({ success = true, duplicate = true, currentSum = tostring(avail) })
+end
+local amount = tonumber(ARGV[3])
+local floor = tonumber(ARGV[5])
+if (avail + amount) < floor then
+  return cjson.encode({ success = false, reason = 'INSUFFICIENT_BALANCE', currentSum = tostring(avail) })
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('INCRBYFLOAT', KEYS[4], ARGV[3])
+redis.call('HINCRBYFLOAT', KEYS[3], ARGV[4], ARGV[3])
+return cjson.encode({ success = true, currentSum = tostring(avail + amount) })
+`;
+var CONFIRM_ENTRY_LUA = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then
+  return cjson.encode({ status = 'not_found' })
+end
+local entry = cjson.decode(raw)
+if entry.state ~= 'pending' then
+  return cjson.encode({ status = 'already_confirmed' })
+end
+local amount = tonumber(entry.amount)
+if entry.held == true then
+  redis.call('INCRBYFLOAT', KEYS[3], -amount)
+end
+redis.call('INCRBYFLOAT', KEYS[2], entry.amount)
+entry.state = 'confirmed'
+entry.confirmedAt = tonumber(ARGV[2])
+entry.pendingExpiresAt = nil
+entry.held = nil
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(entry))
+return cjson.encode({ status = 'confirmed' })
+`;
+var REMOVE_CONFIRMED_ENTRY_LUA = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then
+  return 0
+end
+local entry = cjson.decode(raw)
+if entry.state == 'pending' then
+  return -1
+end
+local neg = -tonumber(entry.amount)
+redis.call('INCRBYFLOAT', KEYS[2], tostring(neg))
+redis.call('HINCRBYFLOAT', KEYS[3], entry.context, neg)
+redis.call('HDEL', KEYS[1], ARGV[1])
+return 1
+`;
+var CANCEL_ENTRY_LUA = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then
+  return cjson.encode({ status = 'not_found' })
+end
+local entry = cjson.decode(raw)
+if entry.state ~= 'pending' then
+  return cjson.encode({ status = 'not_pending' })
+end
+local amount = tonumber(entry.amount)
+if entry.held == true then
+  redis.call('INCRBYFLOAT', KEYS[3], -amount)
+end
+redis.call('HINCRBYFLOAT', KEYS[2], entry.context, -amount)
+redis.call('HDEL', KEYS[1], ARGV[1])
+return cjson.encode({ status = 'cancelled' })
+`;
 
 class Ledger {
   adapter;
@@ -161,18 +263,65 @@ class Ledger {
     }
     await this.adapter.multi().hSet(key, entry.id, JSON.stringify(entry)).incrByFloat(totalKey, parseFloat(entry.amount)).hIncrByFloat(ctxKey, entry.context, parseFloat(entry.amount)).exec();
   }
+  getHoldKey(accountId, currency) {
+    return `${this.config.keyPrefix}:${accountId}:${currency}:hold`;
+  }
+  async addPendingEntry(accountId, currency, entry, options) {
+    const ttl = options?.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+    const stamped = {
+      ...entry,
+      state: "pending",
+      pendingExpiresAt: Date.now() + ttl
+    };
+    const raw = await this.adapter.eval(ADD_PENDING_ENTRY_LUA, [this.getLedgerKey(accountId, currency), this.getContextKey(accountId, currency)], [entry.id, JSON.stringify(stamped), entry.amount, entry.context, String(this.config.maxEntriesPerKey)]);
+    return JSON.parse(raw);
+  }
+  async addPendingEntryIfSufficient(accountId, currency, entry, floor, options) {
+    const ttl = options?.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+    const stamped = {
+      ...entry,
+      state: "pending",
+      pendingExpiresAt: Date.now() + ttl,
+      held: true
+    };
+    const raw = await this.adapter.eval(ADD_PENDING_IF_SUFFICIENT_LUA, [
+      this.getLedgerKey(accountId, currency),
+      this.getTotalKey(accountId, currency),
+      this.getContextKey(accountId, currency),
+      this.getHoldKey(accountId, currency)
+    ], [
+      entry.id,
+      JSON.stringify(stamped),
+      entry.amount,
+      entry.context,
+      String(floor),
+      String(this.config.maxEntriesPerKey)
+    ]);
+    return JSON.parse(raw);
+  }
+  async confirmEntry(accountId, currency, entryId) {
+    const raw = await this.adapter.eval(CONFIRM_ENTRY_LUA, [
+      this.getLedgerKey(accountId, currency),
+      this.getTotalKey(accountId, currency),
+      this.getHoldKey(accountId, currency)
+    ], [entryId, String(Date.now())]);
+    return JSON.parse(raw);
+  }
+  async cancelEntry(accountId, currency, entryId) {
+    const raw = await this.adapter.eval(CANCEL_ENTRY_LUA, [
+      this.getLedgerKey(accountId, currency),
+      this.getContextKey(accountId, currency),
+      this.getHoldKey(accountId, currency)
+    ], [entryId]);
+    return JSON.parse(raw);
+  }
   async removeEntry(accountId, currency, entryId) {
-    const key = this.getLedgerKey(accountId, currency);
-    const totalKey = this.getTotalKey(accountId, currency);
-    const ctxKey = this.getContextKey(accountId, currency);
-    const raw = await this.adapter.hGet(key, entryId);
-    if (!raw) {
-      return false;
-    }
-    const entry = JSON.parse(raw);
-    const amount = parseFloat(entry.amount);
-    await this.adapter.multi().hDel(key, entryId).incrByFloat(totalKey, -amount).hIncrByFloat(ctxKey, entry.context, -amount).exec();
-    return true;
+    const result = await this.adapter.eval(REMOVE_CONFIRMED_ENTRY_LUA, [
+      this.getLedgerKey(accountId, currency),
+      this.getTotalKey(accountId, currency),
+      this.getContextKey(accountId, currency)
+    ], [entryId]);
+    return Number(result) === 1;
   }
   async getEntry(accountId, currency, entryId) {
     const key = this.getLedgerKey(accountId, currency);
@@ -180,9 +329,11 @@ class Ledger {
     return raw ? JSON.parse(raw) : null;
   }
   async getSum(accountId, currency) {
-    const totalKey = this.getTotalKey(accountId, currency);
-    const total = await this.adapter.get(totalKey);
-    return total ?? "0";
+    const [total, hold] = await this.adapter.mGet([
+      this.getTotalKey(accountId, currency),
+      this.getHoldKey(accountId, currency)
+    ]);
+    return String(Number(total ?? "0") + Number(hold ?? "0"));
   }
   async getBalance(accountId, currency) {
     const key = this.getLedgerKey(accountId, currency);
@@ -216,7 +367,7 @@ class Ledger {
     const key = this.getLedgerKey(accountId, currency);
     const totalKey = this.getTotalKey(accountId, currency);
     const ctxKey = this.getContextKey(accountId, currency);
-    await this.adapter.del([key, totalKey, ctxKey]);
+    await this.adapter.del([key, totalKey, ctxKey, this.getHoldKey(accountId, currency)]);
   }
   getConfig() {
     return { ...this.config };
@@ -224,4 +375,4 @@ class Ledger {
 }
 var ledger_default = Ledger;
 
-//# debugId=8D1B1A0FFC04C51D64756E2164756E21
+//# debugId=A98C4C06FAA39CA164756E2164756E21

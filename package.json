@@ -1,6 +1,6 @@
 {
   "name": "qwuack",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Redis-backed ledger with running totals optimization",
   "type": "module",
   "main": "./dist/ledger.js",
@@ -38,7 +38,8 @@
   },
   "homepage": "https://github.com/arifsetyawan/qwuack#readme",
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "ioredis": "5.4.1"
   },
   "peerDependencies": {
     "typescript": "^5"

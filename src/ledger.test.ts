@@ -26,8 +26,10 @@ function createMockRedis() {
     hGetAll: mock(() => Promise.resolve({})),
     hIncrByFloat: mock(() => Promise.resolve("0")),
     get: mock(() => Promise.resolve(null)),
+    mGet: mock(() => Promise.resolve([null, null])),
     incrByFloat: mock(() => Promise.resolve("0")),
     del: mock(() => Promise.resolve(1)),
+    eval: mock(() => Promise.resolve(1)),
     multi: mock(() => mockMulti),
     _mockMulti: mockMulti,
   };
@@ -54,8 +56,10 @@ function createMockIORedis() {
     hgetall: mock(() => Promise.resolve({})),
     hincrbyfloat: mock(() => Promise.resolve("0")),
     get: mock(() => Promise.resolve(null)),
+    mget: mock((..._keys: string[]) => Promise.resolve([null, null])), // variadic
     incrbyfloat: mock(() => Promise.resolve("0")),
     del: mock((...keys: string[]) => Promise.resolve(keys.length)), // variadic
+    eval: mock(() => Promise.resolve(1)),
     multi: mock(() => mockPipeline),
     _mockPipeline: mockPipeline,
   };
@@ -181,39 +185,32 @@ describe("Ledger", () => {
   // --------------------------------------------------------------------------
 
   describe("removeEntry", () => {
-    test("removes existing entry successfully", async () => {
-      mockRedis.hGet.mockReturnValue(Promise.resolve(JSON.stringify(sampleEntry)));
+    test("removes existing (confirmed) entry successfully via Lua", async () => {
+      mockRedis.eval.mockReturnValue(Promise.resolve(1));
 
       const result = await ledger.removeEntry(accountId, currency, "entry_001");
 
       expect(result).toBe(true);
-      expect(mockRedis.hGet).toHaveBeenCalledWith("ledger:acc_123:usd", "entry_001");
-      expect(mockRedis.multi).toHaveBeenCalled();
-      expect(mockRedis._mockMulti.hDel).toHaveBeenCalled();
-      expect(mockRedis._mockMulti.exec).toHaveBeenCalled();
+      expect(mockRedis.eval).toHaveBeenCalledWith(expect.any(String), {
+        keys: ["ledger:acc_123:usd", "ledger:acc_123:usd:total", "ledger:acc_123:usd:ctx"],
+        arguments: ["entry_001"],
+      });
     });
 
-    test("returns false for non-existent entry", async () => {
-      mockRedis.hGet.mockReturnValue(Promise.resolve(null));
+    test("returns false for non-existent entry (Lua returns 0)", async () => {
+      mockRedis.eval.mockReturnValue(Promise.resolve(0));
 
       const result = await ledger.removeEntry(accountId, currency, "nonexistent");
 
       expect(result).toBe(false);
-      expect(mockRedis.multi).not.toHaveBeenCalled();
     });
 
-    test("updates running totals with negative amount on removal", async () => {
-      const entryWithAmount: LedgerEntry = {
-        id: "entry_002",
-        context: "withdrawal",
-        currency: "usd",
-        amount: "500.00",
-      };
-      mockRedis.hGet.mockReturnValue(Promise.resolve(JSON.stringify(entryWithAmount)));
+    test("returns false when Lua refuses a pending entry (returns -1)", async () => {
+      mockRedis.eval.mockReturnValue(Promise.resolve(-1));
 
-      await ledger.removeEntry(accountId, currency, "entry_002");
+      const result = await ledger.removeEntry(accountId, currency, "pending_1");
 
-      expect(mockRedis._mockMulti.incrByFloat).toHaveBeenCalled();
+      expect(result).toBe(false);
     });
   });
 
@@ -246,20 +243,23 @@ describe("Ledger", () => {
 
   describe("getSum", () => {
     test("returns '0' for empty ledger", async () => {
-      mockRedis.get.mockReturnValue(Promise.resolve(null));
+      mockRedis.mGet.mockReturnValue(Promise.resolve([null, null]));
 
       const result = await ledger.getSum(accountId, currency);
 
       expect(result).toBe("0");
-      expect(mockRedis.get).toHaveBeenCalledWith("ledger:acc_123:usd:total");
+      expect(mockRedis.mGet).toHaveBeenCalledWith([
+        "ledger:acc_123:usd:total",
+        "ledger:acc_123:usd:hold",
+      ]);
     });
 
-    test("returns correct sum", async () => {
-      mockRedis.get.mockReturnValue(Promise.resolve("1500.50"));
+    test("returns available sum of :total and :hold", async () => {
+      mockRedis.mGet.mockReturnValue(Promise.resolve(["100", "-40"]));
 
       const result = await ledger.getSum(accountId, currency);
 
-      expect(result).toBe("1500.50");
+      expect(result).toBe("60");
     });
   });
 
@@ -399,6 +399,7 @@ describe("Ledger", () => {
         "ledger:acc_123:usd",
         "ledger:acc_123:usd:total",
         "ledger:acc_123:usd:ctx",
+        "ledger:acc_123:usd:hold",
       ]);
     });
 
@@ -413,6 +414,7 @@ describe("Ledger", () => {
         "myledger:acc_123:usd",
         "myledger:acc_123:usd:total",
         "myledger:acc_123:usd:ctx",
+        "myledger:acc_123:usd:hold",
       ]);
     });
   });
@@ -525,17 +527,17 @@ describe("Ledger with IORedis", () => {
   });
 
   describe("removeEntry with ioredis", () => {
-    test("removes entry successfully", async () => {
-      mockIORedis.hget.mockReturnValue(Promise.resolve(JSON.stringify(sampleEntry)));
+    test("removes entry successfully via Lua", async () => {
+      mockIORedis.eval.mockReturnValue(Promise.resolve(1));
 
       const result = await ledger.removeEntry(accountId, currency, "entry_001");
 
       expect(result).toBe(true);
-      expect(mockIORedis._mockPipeline.hdel).toHaveBeenCalled();
+      expect(mockIORedis.eval).toHaveBeenCalled();
     });
 
     test("returns false for non-existent entry", async () => {
-      mockIORedis.hget.mockReturnValue(Promise.resolve(null));
+      mockIORedis.eval.mockReturnValue(Promise.resolve(0));
 
       const result = await ledger.removeEntry(accountId, currency, "nonexistent");
 
@@ -554,12 +556,12 @@ describe("Ledger with IORedis", () => {
   });
 
   describe("getSum with ioredis", () => {
-    test("returns sum", async () => {
-      mockIORedis.get.mockReturnValue(Promise.resolve("500.00"));
+    test("returns available sum via mget", async () => {
+      mockIORedis.mget.mockReturnValue(Promise.resolve(["500", null]));
 
       const result = await ledger.getSum(accountId, currency);
 
-      expect(result).toBe("500.00");
+      expect(result).toBe("500");
     });
   });
 
@@ -618,5 +620,27 @@ describe("Ledger with IORedis", () => {
       // ioredis del() is called with spread args
       expect(mockIORedis.del).toHaveBeenCalled();
     });
+  });
+});
+
+describe("adapter eval", () => {
+  test("node-redis adapter passes keys/arguments object", async () => {
+    const client = createMockRedis() as any;
+    client.eval = mock(() => Promise.resolve("ok"));
+    const ledger = new Ledger(client);
+    // @ts-expect-error private access for adapter test
+    const result = await ledger.adapter.eval("return 1", ["k1", "k2"], ["a1"]);
+    expect(client.eval).toHaveBeenCalledWith("return 1", { keys: ["k1", "k2"], arguments: ["a1"] });
+    expect(result).toBe("ok");
+  });
+
+  test("ioredis adapter passes numKeys then variadic keys/args", async () => {
+    const client = createMockIORedis() as any;
+    client.eval = mock(() => Promise.resolve("ok"));
+    const ledger = new Ledger(client);
+    // @ts-expect-error private access for adapter test
+    const result = await ledger.adapter.eval("return 1", ["k1", "k2"], ["a1"]);
+    expect(client.eval).toHaveBeenCalledWith("return 1", 2, "k1", "k2", "a1");
+    expect(result).toBe("ok");
   });
 });
