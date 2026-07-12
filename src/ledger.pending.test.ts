@@ -75,3 +75,26 @@ describe("addPendingEntryIfSufficient", () => {
     expect(result).toEqual({ success: false, reason: "INSUFFICIENT_BALANCE", currentSum: "-90" });
   });
 });
+
+describe("confirmEntry", () => {
+  test("evals with entries/total/hold keys, entryId and timestamp", async () => {
+    const client = createMockIORedisEval(JSON.stringify({ status: "confirmed" }));
+    const ledger = new Ledger(client, { keyPrefix: "led" });
+    const before = Date.now();
+    const result = await ledger.confirmEntry("acc", "usd", "e1");
+
+    expect(result).toEqual({ status: "confirmed" });
+    expect(client.eval.mock.calls[0][1]).toBe(3);
+    expect(client.eval.mock.calls[0].slice(2, 5)).toEqual([
+      "led:acc:usd", "led:acc:usd:total", "led:acc:usd:hold",
+    ]);
+    expect(client.eval.mock.calls[0][5]).toBe("e1");
+    expect(Number(client.eval.mock.calls[0][6])).toBeGreaterThanOrEqual(before);
+  });
+
+  test("parses not_found (janitor-cancelled entry)", async () => {
+    const client = createMockIORedisEval(JSON.stringify({ status: "not_found" }));
+    const ledger = new Ledger(client);
+    expect(await ledger.confirmEntry("acc", "usd", "gone")).toEqual({ status: "not_found" });
+  });
+});

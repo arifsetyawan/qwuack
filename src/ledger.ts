@@ -200,6 +200,29 @@ redis.call('HINCRBYFLOAT', KEYS[3], ARGV[4], ARGV[3])
 return cjson.encode({ success = true, currentSum = tostring(avail + amount) })
 `;
 
+// KEYS[1]=entries KEYS[2]=:total KEYS[3]=:hold
+// ARGV[1]=entryId ARGV[2]=confirmedAt(ms)
+const CONFIRM_ENTRY_LUA = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then
+  return cjson.encode({ status = 'not_found' })
+end
+local entry = cjson.decode(raw)
+if entry.state ~= 'pending' then
+  return cjson.encode({ status = 'already_confirmed' })
+end
+local amount = tonumber(entry.amount)
+if amount < 0 then
+  redis.call('INCRBYFLOAT', KEYS[3], -amount)
+end
+redis.call('INCRBYFLOAT', KEYS[2], entry.amount)
+entry.state = 'confirmed'
+entry.confirmedAt = tonumber(ARGV[2])
+entry.pendingExpiresAt = nil
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(entry))
+return cjson.encode({ status = 'confirmed' })
+`;
+
 // ============================================================================
 // Ledger Class
 // ============================================================================
@@ -321,6 +344,23 @@ export class Ledger<TPayload = Record<string, unknown>> {
         String(floor),
         String(this.config.maxEntriesPerKey),
       ]
+    );
+    return JSON.parse(raw as string);
+  }
+
+  async confirmEntry(
+    accountId: string,
+    currency: string,
+    entryId: string
+  ): Promise<{ status: "confirmed" | "already_confirmed" | "not_found" }> {
+    const raw = await this.adapter.eval(
+      CONFIRM_ENTRY_LUA,
+      [
+        this.getLedgerKey(accountId, currency),
+        this.getTotalKey(accountId, currency),
+        this.getHoldKey(accountId, currency),
+      ],
+      [entryId, String(Date.now())]
     );
     return JSON.parse(raw as string);
   }
