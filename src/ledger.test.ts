@@ -620,3 +620,25 @@ describe("Ledger with IORedis", () => {
     });
   });
 });
+
+describe("adapter eval", () => {
+  test("node-redis adapter passes keys/arguments object", async () => {
+    const client = createMockRedis() as any;
+    client.eval = mock(() => Promise.resolve("ok"));
+    const ledger = new Ledger(client);
+    // @ts-expect-error private access for adapter test
+    const result = await ledger.adapter.eval("return 1", ["k1", "k2"], ["a1"]);
+    expect(client.eval).toHaveBeenCalledWith("return 1", { keys: ["k1", "k2"], arguments: ["a1"] });
+    expect(result).toBe("ok");
+  });
+
+  test("ioredis adapter passes numKeys then variadic keys/args", async () => {
+    const client = createMockIORedis() as any;
+    client.eval = mock(() => Promise.resolve("ok"));
+    const ledger = new Ledger(client);
+    // @ts-expect-error private access for adapter test
+    const result = await ledger.adapter.eval("return 1", ["k1", "k2"], ["a1"]);
+    expect(client.eval).toHaveBeenCalledWith("return 1", 2, "k1", "k2", "a1");
+    expect(result).toBe("ok");
+  });
+});

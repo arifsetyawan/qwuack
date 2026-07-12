@@ -64,6 +64,7 @@ interface RedisAdapter {
   get(key: string): Promise<string | null>;
   incrByFloat(key: string, increment: number): Promise<string>;
   del(keys: string[]): Promise<number>;
+  eval(script: string, keys: string[], args: string[]): Promise<unknown>;
   multi(): MultiAdapter;
 }
 
@@ -84,6 +85,7 @@ function createNodeRedisAdapter(client: any): RedisAdapter {
     get: (key) => client.get(key),
     incrByFloat: (key, increment) => client.incrByFloat(key, increment),
     del: (keys) => client.del(keys),
+    eval: (script, keys, args) => client.eval(script, { keys, arguments: args }),
     multi: () => {
       const m = client.multi();
       const adapter: MultiAdapter = {
@@ -118,6 +120,7 @@ function createIORedisAdapter(client: any): RedisAdapter {
     get: (key) => client.get(key),
     incrByFloat: (key, increment) => client.incrbyfloat(key, increment),
     del: (keys) => client.del(...keys),
+    eval: (script, keys, args) => client.eval(script, keys.length, ...keys, ...args),
     multi: () => {
       const pipeline = client.multi();
       const adapter: MultiAdapter = {
