@@ -260,3 +260,47 @@ export {
   POOL_SIZE,
 };
 export type { LedgerEntry, PaginatedResult };
+
+// ============================================================================
+// Demo (runs only when executed directly: `bun run poc/ledger-10k.ts`)
+// ============================================================================
+
+if (import.meta.main) {
+  const accountId = "demo_10k";
+  const currency = "usd";
+
+  console.log(`Connected to Redis at ${process.env.REDIS_URL} (pool size ${POOL_SIZE})`);
+  console.log("Running ledger-10k demo...\n");
+
+  await clearLedger(accountId, currency);
+
+  await addEntry(accountId, currency, { id: "demo-1", context: "funding", currency, amount: "1000" });
+  await addEntry(accountId, currency, { id: "demo-2", context: "payout", currency, amount: "-250" });
+  console.log("Sum:", await getSum(accountId, currency), "(expect 750)");
+  console.log("Balance:", await getBalance(accountId, currency));
+  const page = await getEntriesPaginated(accountId, currency);
+  console.log(`Paginated fetch: ${page.entries.length} entries (expect 2), hasMore: ${page.hasMore}`);
+
+  await clearLedger(accountId, currency);
+  const sameId = Array.from({ length: 50 }, () =>
+    addEntry(accountId, currency, { id: "same", context: "race", currency, amount: "10" })
+  );
+  const settled = await Promise.allSettled(sameId);
+  const wins = settled.filter((s) => s.status === "fulfilled").length;
+  console.log(`\nSame-id storm: ${wins}/50 succeeded (expect 1), sum=${await getSum(accountId, currency)} (expect 10)`);
+
+  await clearLedger(accountId, currency);
+  await Promise.all(
+    Array.from({ length: 200 }, async (_, i) => {
+      const id = `storm-${i}`;
+      await addEntry(accountId, currency, { id, context: "storm", currency, amount: "7" });
+      await removeEntry(accountId, currency, id);
+    })
+  );
+  const bal = await getBalance(accountId, currency);
+  console.log(`Add/remove storm: sum=${await getSum(accountId, currency)} (expect 0), entries=${bal.entryCount} (expect 0)`);
+
+  await clearLedger(accountId, currency);
+  console.log("\nDemo complete, ledger cleared.");
+  await quitAll();
+}
