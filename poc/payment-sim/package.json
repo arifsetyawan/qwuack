@@ -1,0 +1,28 @@
+{
+  "name": "@poc/payment-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "POC: two-phase payment simulation using the live qwuack npm package (Redis soft ledger), MySQL final ledger, and RabbitMQ pub/sub balance settlement",
+  "type": "module",
+  "scripts": {
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down -v --remove-orphans",
+    "typecheck": "tsc --noEmit",
+    "test": "docker compose up -d --wait && (POC_PAYMENT_SIM=1 bun test tests/payment-flow.test.ts --timeout 60000; code=$?; docker compose down -v --remove-orphans; exit $code)",
+    "test:keep": "docker compose up -d --wait && POC_PAYMENT_SIM=1 bun test tests/payment-flow.test.ts --timeout 60000",
+    "load": "docker compose up -d --wait && (POC_LOAD_TEST=1 bun test tests/load.test.ts --timeout 1500000; code=$?; docker compose down -v --remove-orphans; exit $code)",
+    "load:keep": "docker compose up -d --wait && POC_LOAD_TEST=1 bun test tests/load.test.ts --timeout 1500000"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.5",
+    "ioredis": "^5.4.1",
+    "mysql2": "^3.11.0",
+    "qwuack": "^0.2.0",
+    "sequelize": "^6.37.3"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.8",
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
