@@ -43,3 +43,35 @@ describe("addPendingEntry", () => {
     expect(result).toEqual({ duplicate: true });
   });
 });
+
+describe("addPendingEntryIfSufficient", () => {
+  const debit: LedgerEntry = { id: "d1", context: "transaction/conversion", currency: "usd", amount: "-40" };
+
+  test("evals with entries/total/ctx/hold keys and floor", async () => {
+    const client = createMockIORedisEval(JSON.stringify({ success: true, currentSum: "-40" }));
+    const ledger = new Ledger(client, { keyPrefix: "led", maxEntriesPerKey: 500 });
+    const result = await ledger.addPendingEntryIfSufficient("acc", "usd", debit, "-100");
+
+    expect(result.success).toBe(true);
+    expect(client.eval.mock.calls[0][1]).toBe(4); // numKeys
+    expect(client.eval.mock.calls[0].slice(2, 6)).toEqual([
+      "led:acc:usd", "led:acc:usd:total", "led:acc:usd:ctx", "led:acc:usd:hold",
+    ]);
+    expect(client.eval.mock.calls[0][6]).toBe("d1");
+    const storedJson = JSON.parse(client.eval.mock.calls[0][7]);
+    expect(storedJson.state).toBe("pending");
+    expect(client.eval.mock.calls[0][8]).toBe("-40");   // amount
+    expect(client.eval.mock.calls[0][9]).toBe("transaction/conversion");
+    expect(client.eval.mock.calls[0][10]).toBe("-100"); // floor
+    expect(client.eval.mock.calls[0][11]).toBe("500");  // maxEntries
+  });
+
+  test("parses insufficient result", async () => {
+    const client = createMockIORedisEval(
+      JSON.stringify({ success: false, reason: "INSUFFICIENT_BALANCE", currentSum: "-90" })
+    );
+    const ledger = new Ledger(client);
+    const result = await ledger.addPendingEntryIfSufficient("acc", "usd", debit, "-100");
+    expect(result).toEqual({ success: false, reason: "INSUFFICIENT_BALANCE", currentSum: "-90" });
+  });
+});

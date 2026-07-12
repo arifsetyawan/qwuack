@@ -176,6 +176,30 @@ redis.call('HINCRBYFLOAT', KEYS[2], ARGV[4], ARGV[3])
 return cjson.encode({ duplicate = false })
 `;
 
+// KEYS[1]=entries KEYS[2]=:total KEYS[3]=:ctx KEYS[4]=:hold
+// ARGV[1]=entryId ARGV[2]=entryJSON ARGV[3]=amount ARGV[4]=context ARGV[5]=floor ARGV[6]=maxEntries
+const ADD_PENDING_IF_SUFFICIENT_LUA = `
+local maxEntries = tonumber(ARGV[6])
+if maxEntries and maxEntries > 0 and redis.call('HLEN', KEYS[1]) >= maxEntries then
+  return redis.error_reply('LEDGER_LIMIT_REACHED')
+end
+local total = tonumber(redis.call('GET', KEYS[2]) or '0')
+local hold = tonumber(redis.call('GET', KEYS[4]) or '0')
+local avail = total + hold
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+  return cjson.encode({ success = true, duplicate = true, currentSum = tostring(avail) })
+end
+local amount = tonumber(ARGV[3])
+local floor = tonumber(ARGV[5])
+if (avail + amount) < floor then
+  return cjson.encode({ success = false, reason = 'INSUFFICIENT_BALANCE', currentSum = tostring(avail) })
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('INCRBYFLOAT', KEYS[4], ARGV[3])
+redis.call('HINCRBYFLOAT', KEYS[3], ARGV[4], ARGV[3])
+return cjson.encode({ success = true, currentSum = tostring(avail + amount) })
+`;
+
 // ============================================================================
 // Ledger Class
 // ============================================================================
@@ -264,6 +288,39 @@ export class Ledger<TPayload = Record<string, unknown>> {
       ADD_PENDING_ENTRY_LUA,
       [this.getLedgerKey(accountId, currency), this.getContextKey(accountId, currency)],
       [entry.id, JSON.stringify(stamped), entry.amount, entry.context, String(this.config.maxEntriesPerKey)]
+    );
+    return JSON.parse(raw as string);
+  }
+
+  async addPendingEntryIfSufficient(
+    accountId: string,
+    currency: string,
+    entry: LedgerEntry<TPayload>,
+    floor: string | number,
+    options?: { pendingTtlMs?: number }
+  ): Promise<{ success: boolean; duplicate?: boolean; reason?: string; currentSum: string }> {
+    const ttl = options?.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+    const stamped: LedgerEntry<TPayload> = {
+      ...entry,
+      state: "pending",
+      pendingExpiresAt: Date.now() + ttl,
+    };
+    const raw = await this.adapter.eval(
+      ADD_PENDING_IF_SUFFICIENT_LUA,
+      [
+        this.getLedgerKey(accountId, currency),
+        this.getTotalKey(accountId, currency),
+        this.getContextKey(accountId, currency),
+        this.getHoldKey(accountId, currency),
+      ],
+      [
+        entry.id,
+        JSON.stringify(stamped),
+        entry.amount,
+        entry.context,
+        String(floor),
+        String(this.config.maxEntriesPerKey),
+      ]
     );
     return JSON.parse(raw as string);
   }
