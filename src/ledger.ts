@@ -5,12 +5,17 @@
 // Types
 // ============================================================================
 
+export type EntryState = "pending" | "confirmed";
+
 export interface LedgerEntry<TPayload = Record<string, unknown>> {
   id: string;
   context: string;
   currency: string;
   amount: string;
   payload?: TPayload;
+  state?: EntryState;
+  pendingExpiresAt?: number;
+  confirmedAt?: number;
 }
 
 export interface BalanceResult {
@@ -154,6 +159,23 @@ const DEFAULT_CONFIG: RequiredLedgerConfig = {
   keyPrefix: "ledger",
 };
 
+export const DEFAULT_PENDING_TTL_MS = 600_000;
+
+// KEYS[1]=entries KEYS[2]=:ctx
+// ARGV[1]=entryId ARGV[2]=entryJSON ARGV[3]=amount ARGV[4]=context ARGV[5]=maxEntries
+const ADD_PENDING_ENTRY_LUA = `
+local maxEntries = tonumber(ARGV[5])
+if maxEntries and maxEntries > 0 and redis.call('HLEN', KEYS[1]) >= maxEntries then
+  return redis.error_reply('LEDGER_LIMIT_REACHED')
+end
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+  return cjson.encode({ duplicate = true })
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('HINCRBYFLOAT', KEYS[2], ARGV[4], ARGV[3])
+return cjson.encode({ duplicate = false })
+`;
+
 // ============================================================================
 // Ledger Class
 // ============================================================================
@@ -220,6 +242,30 @@ export class Ledger<TPayload = Record<string, unknown>> {
       .incrByFloat(totalKey, parseFloat(entry.amount))
       .hIncrByFloat(ctxKey, entry.context, parseFloat(entry.amount))
       .exec();
+  }
+
+  private getHoldKey(accountId: string, currency: string): string {
+    return `${this.config.keyPrefix}:${accountId}:${currency}:hold`;
+  }
+
+  async addPendingEntry(
+    accountId: string,
+    currency: string,
+    entry: LedgerEntry<TPayload>,
+    options?: { pendingTtlMs?: number }
+  ): Promise<{ duplicate: boolean }> {
+    const ttl = options?.pendingTtlMs ?? DEFAULT_PENDING_TTL_MS;
+    const stamped: LedgerEntry<TPayload> = {
+      ...entry,
+      state: "pending",
+      pendingExpiresAt: Date.now() + ttl,
+    };
+    const raw = await this.adapter.eval(
+      ADD_PENDING_ENTRY_LUA,
+      [this.getLedgerKey(accountId, currency), this.getContextKey(accountId, currency)],
+      [entry.id, JSON.stringify(stamped), entry.amount, entry.context, String(this.config.maxEntriesPerKey)]
+    );
+    return JSON.parse(raw as string);
   }
 
   async removeEntry(
