@@ -213,7 +213,7 @@ if entry.state ~= 'pending' then
   return cjson.encode({ status = 'already_confirmed' })
 end
 local amount = tonumber(entry.amount)
-if entry.held then
+if entry.held == true then
   redis.call('INCRBYFLOAT', KEYS[3], -amount)
 end
 redis.call('INCRBYFLOAT', KEYS[2], entry.amount)
@@ -223,6 +223,26 @@ entry.pendingExpiresAt = nil
 entry.held = nil
 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(entry))
 return cjson.encode({ status = 'confirmed' })
+`;
+
+// KEYS[1]=entries KEYS[2]=:ctx KEYS[3]=:hold
+// ARGV[1]=entryId
+const CANCEL_ENTRY_LUA = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then
+  return cjson.encode({ status = 'not_found' })
+end
+local entry = cjson.decode(raw)
+if entry.state ~= 'pending' then
+  return cjson.encode({ status = 'not_pending' })
+end
+local amount = tonumber(entry.amount)
+if entry.held == true then
+  redis.call('INCRBYFLOAT', KEYS[3], -amount)
+end
+redis.call('HINCRBYFLOAT', KEYS[2], entry.context, -amount)
+redis.call('HDEL', KEYS[1], ARGV[1])
+return cjson.encode({ status = 'cancelled' })
 `;
 
 // ============================================================================
@@ -364,6 +384,23 @@ export class Ledger<TPayload = Record<string, unknown>> {
         this.getHoldKey(accountId, currency),
       ],
       [entryId, String(Date.now())]
+    );
+    return JSON.parse(raw as string);
+  }
+
+  async cancelEntry(
+    accountId: string,
+    currency: string,
+    entryId: string
+  ): Promise<{ status: "cancelled" | "not_pending" | "not_found" }> {
+    const raw = await this.adapter.eval(
+      CANCEL_ENTRY_LUA,
+      [
+        this.getLedgerKey(accountId, currency),
+        this.getContextKey(accountId, currency),
+        this.getHoldKey(accountId, currency),
+      ],
+      [entryId]
     );
     return JSON.parse(raw as string);
   }

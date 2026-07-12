@@ -99,3 +99,24 @@ describe("confirmEntry", () => {
     expect(await ledger.confirmEntry("acc", "usd", "gone")).toEqual({ status: "not_found" });
   });
 });
+
+describe("cancelEntry", () => {
+  test("evals with entries/ctx/hold keys and entryId", async () => {
+    const client = createMockIORedisEval(JSON.stringify({ status: "cancelled" }));
+    const ledger = new Ledger(client, { keyPrefix: "led" });
+    const result = await ledger.cancelEntry("acc", "usd", "e1");
+
+    expect(result).toEqual({ status: "cancelled" });
+    expect(client.eval.mock.calls[0][1]).toBe(3);
+    expect(client.eval.mock.calls[0].slice(2, 5)).toEqual([
+      "led:acc:usd", "led:acc:usd:ctx", "led:acc:usd:hold",
+    ]);
+    expect(client.eval.mock.calls[0][5]).toBe("e1");
+  });
+
+  test("parses not_pending for confirmed entries", async () => {
+    const client = createMockIORedisEval(JSON.stringify({ status: "not_pending" }));
+    const ledger = new Ledger(client);
+    expect(await ledger.cancelEntry("acc", "usd", "e1")).toEqual({ status: "not_pending" });
+  });
+});
