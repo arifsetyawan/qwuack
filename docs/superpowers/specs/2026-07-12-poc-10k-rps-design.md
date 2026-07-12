@@ -46,7 +46,7 @@ Follow the existing one-file-per-iteration convention (`ledger.ts` → `ledger-o
 
 ### Lua scripts
 
-Registered with node-redis `defineScript` (handles `EVALSHA` + `NOSCRIPT` fallback). Both scripts operate only on keys derived from one `{accountId, currency}` pair, so they are single-node safe.
+Loaded once at startup via `SCRIPT LOAD`, invoked per call with `EVALSHA`, falling back to `EVAL` on `NOSCRIPT` (the script cache is server-global, so one load covers the whole pool). Both scripts operate only on keys derived from one `{accountId, currency}` pair, so they are single-node safe.
 
 **ADD** — KEYS: hash, total, ctx; ARGV: entryId, entryJson, amount, context, maxEntries
 
