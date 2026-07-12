@@ -68,6 +68,7 @@ interface RedisAdapter {
   hIncrByFloat(key: string, field: string, increment: number): Promise<string>;
   hScan(key: string, cursor: string, options: { COUNT: number }): Promise<HScanResult>;
   get(key: string): Promise<string | null>;
+  mGet(keys: string[]): Promise<Array<string | null>>;
   incrByFloat(key: string, increment: number): Promise<string>;
   del(keys: string[]): Promise<number>;
   eval(script: string, keys: string[], args: string[]): Promise<unknown>;
@@ -89,6 +90,7 @@ function createNodeRedisAdapter(client: any): RedisAdapter {
     hIncrByFloat: (key, field, increment) => client.hIncrByFloat(key, field, increment),
     hScan: (key, cursor, options) => client.hScan(key, cursor, options),
     get: (key) => client.get(key),
+    mGet: (keys) => client.mGet(keys),
     incrByFloat: (key, increment) => client.incrByFloat(key, increment),
     del: (keys) => client.del(keys),
     eval: (script, keys, args) => client.eval(script, { keys, arguments: args }),
@@ -124,6 +126,7 @@ function createIORedisAdapter(client: any): RedisAdapter {
       return { cursor: nextCursor, entries };
     },
     get: (key) => client.get(key),
+    mGet: (keys) => client.mget(...keys),
     incrByFloat: (key, increment) => client.incrbyfloat(key, increment),
     del: (keys) => client.del(...keys),
     eval: (script, keys, args) => client.eval(script, keys.length, ...keys, ...args),
@@ -223,6 +226,24 @@ entry.pendingExpiresAt = nil
 entry.held = nil
 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(entry))
 return cjson.encode({ status = 'confirmed' })
+`;
+
+// KEYS[1]=entries KEYS[2]=:total KEYS[3]=:ctx
+// ARGV[1]=entryId  → 1 removed | 0 not found | -1 refused (pending)
+const REMOVE_CONFIRMED_ENTRY_LUA = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then
+  return 0
+end
+local entry = cjson.decode(raw)
+if entry.state == 'pending' then
+  return -1
+end
+local neg = -tonumber(entry.amount)
+redis.call('INCRBYFLOAT', KEYS[2], tostring(neg))
+redis.call('HINCRBYFLOAT', KEYS[3], entry.context, neg)
+redis.call('HDEL', KEYS[1], ARGV[1])
+return 1
 `;
 
 // KEYS[1]=entries KEYS[2]=:ctx KEYS[3]=:hold
@@ -410,28 +431,17 @@ export class Ledger<TPayload = Record<string, unknown>> {
     currency: string,
     entryId: string
   ): Promise<boolean> {
-    const key = this.getLedgerKey(accountId, currency);
-    const totalKey = this.getTotalKey(accountId, currency);
-    const ctxKey = this.getContextKey(accountId, currency);
-
-    // Get entry first to know amount and context
-    const raw = await this.adapter.hGet(key, entryId);
-    if (!raw) {
-      return false;
-    }
-
-    const entry: LedgerEntry<TPayload> = JSON.parse(raw);
-    const amount = parseFloat(entry.amount);
-
-    // Atomic transaction: remove entry + update running totals
-    await this.adapter
-      .multi()
-      .hDel(key, entryId)
-      .incrByFloat(totalKey, -amount)
-      .hIncrByFloat(ctxKey, entry.context, -amount)
-      .exec();
-
-    return true;
+    // Atomic: refuses (-1) pending entries; legacy stateless entries stay removable.
+    const result = await this.adapter.eval(
+      REMOVE_CONFIRMED_ENTRY_LUA,
+      [
+        this.getLedgerKey(accountId, currency),
+        this.getTotalKey(accountId, currency),
+        this.getContextKey(accountId, currency),
+      ],
+      [entryId]
+    );
+    return Number(result) === 1;
   }
 
   // --------------------------------------------------------------------------
@@ -449,9 +459,11 @@ export class Ledger<TPayload = Record<string, unknown>> {
   }
 
   async getSum(accountId: string, currency: string): Promise<string> {
-    const totalKey = this.getTotalKey(accountId, currency);
-    const total = await this.adapter.get(totalKey);
-    return total ?? "0";
+    const [total, hold] = await this.adapter.mGet([
+      this.getTotalKey(accountId, currency),
+      this.getHoldKey(accountId, currency),
+    ]);
+    return String(Number(total ?? "0") + Number(hold ?? "0"));
   }
 
   async getBalance(accountId: string, currency: string): Promise<BalanceResult> {
@@ -508,7 +520,7 @@ export class Ledger<TPayload = Record<string, unknown>> {
     const ctxKey = this.getContextKey(accountId, currency);
 
     // Delete all related keys atomically
-    await this.adapter.del([key, totalKey, ctxKey]);
+    await this.adapter.del([key, totalKey, ctxKey, this.getHoldKey(accountId, currency)]);
   }
 
   // --------------------------------------------------------------------------

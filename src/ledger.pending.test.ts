@@ -120,3 +120,43 @@ describe("cancelEntry", () => {
     expect(await ledger.cancelEntry("acc", "usd", "e1")).toEqual({ status: "not_pending" });
   });
 });
+
+describe("guarded removeEntry", () => {
+  test("returns false when Lua refuses a pending entry", async () => {
+    const client = createMockIORedisEval("-1");
+    const ledger = new Ledger(client, { keyPrefix: "led" });
+    expect(await ledger.removeEntry("acc", "usd", "e1")).toBe(false);
+    expect(client.eval.mock.calls[0].slice(2, 5)).toEqual([
+      "led:acc:usd", "led:acc:usd:total", "led:acc:usd:ctx",
+    ]);
+  });
+
+  test("returns true when removed", async () => {
+    const client = createMockIORedisEval("1");
+    const ledger = new Ledger(client);
+    expect(await ledger.removeEntry("acc", "usd", "e1")).toBe(true);
+  });
+
+  test("returns false when entry missing", async () => {
+    const client = createMockIORedisEval("0");
+    const ledger = new Ledger(client);
+    expect(await ledger.removeEntry("acc", "usd", "gone")).toBe(false);
+  });
+});
+
+describe("available getSum", () => {
+  test("sums :total and :hold via mget", async () => {
+    const client = createMockIORedisEval("");
+    client.mget = mock(() => Promise.resolve(["100", "-40"]));
+    const ledger = new Ledger(client, { keyPrefix: "led" });
+    expect(await ledger.getSum("acc", "usd")).toBe("60");
+    expect(client.mget).toHaveBeenCalledWith("led:acc:usd:total", "led:acc:usd:hold");
+  });
+
+  test("treats missing keys as zero", async () => {
+    const client = createMockIORedisEval("");
+    client.mget = mock(() => Promise.resolve([null, null]));
+    const ledger = new Ledger(client);
+    expect(await ledger.getSum("acc", "usd")).toBe("0");
+  });
+});
