@@ -1,0 +1,4 @@
+[test]
+# Coverage measures the published library (src/); poc/ scripts and the
+# payment-sim sub-project are exercised by their own runs, not the badge.
+coveragePathIgnorePatterns = ["poc/**"]

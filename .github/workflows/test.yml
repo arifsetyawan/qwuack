@@ -10,6 +10,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,17 +31,25 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
+        run: |
+          bun install
+          # payment-sim is a self-contained sub-project; its test files are
+          # discovered by the root `bun test` and need their imports resolvable
+          # (the suites themselves skip unless POC_PAYMENT_SIM/POC_LOAD_TEST is set).
+          bun install --cwd poc/payment-sim
 
       - name: Run tests with coverage
         id: coverage
+        env:
+          REDIS_URL: redis://localhost:6379
         run: |
-          # Run tests and capture output
-          OUTPUT=$(bun test --coverage 2>&1)
-          echo "$OUTPUT"
+          # tee (not command substitution) so test output reaches the log even
+          # when bun test fails; pipefail preserves its exit code through tee.
+          set -o pipefail
+          bun test --coverage 2>&1 | tee test-output.log
 
           # Extract line coverage percentage
-          COVERAGE=$(echo "$OUTPUT" | grep -E "^\s*All files" | awk '{print $4}' | tr -d '%')
+          COVERAGE=$(grep -E "^\s*All files" test-output.log | awk '{print $4}' | tr -d '%')
           echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
 
           # Determine badge color based on coverage
