@@ -215,3 +215,38 @@ export {
   MAX_ENTRIES_PER_KEY,
 };
 export type { LedgerEntry, PaginatedResult };
+
+// ============================================================================
+// Demo (runs only when executed directly: `bun run poc/ledger-optimized.ts`)
+// ============================================================================
+
+if (import.meta.main) {
+  const accountId = "demo_acc";
+  const currency = "usd";
+
+  console.log(`Connected to Redis at ${process.env.REDIS_URL}`);
+  console.log("Running ledger-optimized demo...\n");
+
+  await clearLedger(accountId, currency);
+
+  const demoEntries: LedgerEntry[] = [
+    { id: "demo-1", context: "funding", currency, amount: "1000" },
+    { id: "demo-2", context: "payout", currency, amount: "-250" },
+    { id: "demo-3", context: "funding", currency, amount: "500" },
+  ];
+
+  for (const entry of demoEntries) {
+    await addEntry(accountId, currency, entry);
+    console.log(`Added ${entry.id}: ${entry.amount} (${entry.context})`);
+  }
+
+  console.log("\nSum:", await getSum(accountId, currency));
+  console.log("Balance:", await getBalance(accountId, currency));
+
+  const page = await getEntriesPaginated(accountId, currency);
+  console.log(`Paginated fetch: ${page.entries.length} entries, hasMore: ${page.hasMore}`);
+
+  await clearLedger(accountId, currency);
+  console.log("\nDemo complete, ledger cleared.");
+  await redis.quit();
+}
